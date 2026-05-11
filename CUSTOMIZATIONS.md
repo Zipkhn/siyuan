@@ -24,7 +24,10 @@ Base upstream : **v3.6.5** (`96dfe0bea4`).
 
 ## Fichiers ajoutés (n'existent pas upstream)
 
-Aucun fichier custom ajouté pour l'instant. Les fichiers `CLAUDE.md`, `.claude/`, `CUSTOMIZATIONS.md` lui-même : voir section suivante.
+| Fichier | Raison | Risque conflit |
+|---|---|---|
+| [CUSTOMIZATIONS.md](CUSTOMIZATIONS.md) | Inventaire des divergences (ce fichier). | 🟢 — nom peu probable upstream. |
+| [docs/v1/architecture.md](docs/v1/architecture.md) | Spec V1 figée : schéma publication, format snapshot, modèle de données du reader. | 🟢 — dossier `docs/` n'existe pas upstream. |
 
 ## Fichiers non-trackés (gitignored)
 
