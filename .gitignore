@@ -28,6 +28,8 @@ electron/dist
 # IDE
 .idea/
 .vscode/
+.claude/
+CLAUDE.md
 
 # Log
 logs
