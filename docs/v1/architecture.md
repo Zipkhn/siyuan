@@ -68,9 +68,11 @@ Marquer un **document entier** comme publié = positionner des attributs IAL sur
 ## 2. Format du snapshot
 
 ### Choix
-**JSON** comme source de vérité unique. Le reader render le JSON → HTML au moment du rendu (Next.js SSR/ISR). Aucun HTML pré-rendu en V1.
+**JSON canonique** comme source de vérité, **+ artefact HTML sanitisé en sibling** (amendement post-cadrage initial).
 
-Bénéfices : présentation modifiable sans re-extraction, indexation directe, stockage compact.
+Le reader peut soit re-rendre le JSON (présentation custom), soit consommer directement le HTML sanitisé (rapide, simple). Deux artefacts pour deux usages.
+
+Bénéfices : présentation modifiable sans re-extraction, indexation directe, stockage compact, HTML déjà sécurisé côté reader.
 
 ### Schéma d'un snapshot doc (`snapshots/<project>/docs/<doc_id>.json`)
 
@@ -89,10 +91,11 @@ Bénéfices : présentation modifiable sans re-extraction, indexation directe, s
   },
   "content": {
     "blocks": [
-      { "id": "...", "type": "NodeHeading", "level": 1, "text": "Titre principal", "children": [] },
-      { "id": "...", "type": "NodeParagraph", "text": "...", "marks": [], "children": [] }
+      { "id": "...", "type": "NodeHeading", "level": 1, "text": "Titre principal", "marks": [] },
+      { "id": "...", "type": "NodeParagraph", "text": "...", "marks": [] }
     ]
   },
+  "content_hash": "sha256-hex",          // sha256 canonical JSON of content.blocks — sert d'idempotence
   "assets": [
     {
       "original_path": "assets/diagram-abc.png",
@@ -108,6 +111,33 @@ Bénéfices : présentation modifiable sans re-extraction, indexation directe, s
   "search_text": "Concaténation plain-text de tous les blocs pour ingestion dans un index full-text."
 }
 ```
+
+### HTML sibling (`snapshots/<project>/docs/<doc_id>.html`)
+
+Si `EMIT_HTML=true` côté extracteur (défaut V1), un fichier `.html` sibling est écrit. Contenu : HTML rendu par Siyuan, passé dans `sanitize-html` avec allowlist stricte :
+- Tags autorisés : headings, paragraphes, listes, blockquote, code/pre, images, tables, formatages inline (`strong`, `em`, `code`, `s`, `u`, `sub`, `sup`), `a` (schemes http/https/mailto).
+- Attributs autorisés : `href`/`title` (a), `src`/`alt`/`title` (img), `class` (span/div/code/pre), `data-node-id`/`data-type`/`data-subtype` (tous).
+- Tags strippés : scripts, iframes, event handlers (`onclick=*`), styles inline.
+- URLs d'assets ré-écrites : `assets/foo.png` → `/<project>/assets/<base>.<sha12>.<ext>`.
+- Liens internes Siyuan (`siyuan://`) : remplacés par un `<span>` au texte d'ancrage.
+
+### Niveau de couverture V1.0 (extracteur)
+
+| Type Siyuan | JSON blocks | HTML sibling | Notes |
+|---|---|---|---|
+| `NodeHeading` | ✅ | ✅ | levels 1-6 |
+| `NodeParagraph` | ✅ | ✅ | `marks: []` en V1.0 |
+| `NodeList` / `NodeListItem` | ✅ | ✅ | ordered via `data-subtype` |
+| `NodeCodeBlock` | ✅ | ✅ | language extrait |
+| `NodeBlockquote` | ✅ | ✅ | |
+| `NodeThematicBreak` | ✅ | ✅ | |
+| `NodeImage` | ❌ V1.1 | ✅ | seulement via HTML pour l'instant |
+| `NodeTable` | ❌ V1.1 | ✅ | |
+| `NodeMathBlock` | ❌ V1.1 | ✅ | |
+| `NodeAttributeView` | ❌ V1.1 | ✅ | |
+| `NodeSuperBlock` | ❌ V1.1 | ✅ | |
+
+Marks inline (`strong`, `em`, `code`, `link`, `strike`) : non extraits en JSON V1.0. Présents dans le HTML sanitisé.
 
 ### Types de blocs supportés en V1
 
@@ -148,7 +178,8 @@ snapshots/                                  # racine snapshots, monté en volume
 └── <project>/
     ├── index.json                         # liste des docs publiés du projet
     ├── docs/
-    │   └── <doc_id>.json                  # un fichier par doc
+    │   ├── <doc_id>.json                  # snapshot canonique
+    │   └── <doc_id>.html                  # sibling HTML sanitisé (si EMIT_HTML=true)
     └── assets/
         └── <basename>.<sha256-12chars>.<ext>
 ```
@@ -173,7 +204,13 @@ snapshots/                                  # racine snapshots, monté en volume
 ```
 
 ### Atomicité d'écriture
-L'extracteur écrit dans un fichier temporaire (`*.tmp` dans le même dossier) puis fait un `rename()` atomique. Le reader ne lit jamais un fichier partiel.
+L'extracteur écrit dans un fichier temporaire (`*.<random>.tmp` dans le même dossier) puis fait un `rename()` atomique. Le reader ne lit jamais un fichier partiel.
+
+### Idempotence
+- Avant d'écrire, l'extracteur lit le snapshot existant s'il est présent.
+- Si `content_hash` ET `doc.version` sont identiques → **skip write** (log info).
+- Sinon → écriture atomique JSON + HTML.
+- Assets : content-addressed via sha256, jamais réécrits si le hash existe déjà sur disque.
 
 ### Suppression
 - Unpublish → supprime `<doc_id>.json` + entrée dans `index.json` (réécriture atomique).
@@ -307,7 +344,20 @@ Pas d'auto-signup. Pas d'inscription depuis l'UI publique.
 
 ---
 
-## 4. Hors scope V1 (verrouillé)
+## 4. Extracteur — décisions techniques (post-cadrage)
+
+- Repo séparé : `siyuan-extractor/`. Stack : Node.js 20+, TypeScript, Fastify, fetch natif, sanitize-html, cheerio.
+- Mode : serveur HTTP long-running. Pas de CLI one-shot, pas de polling fallback en V1 (le webhook plugin est l'unique source d'événements).
+- Sink V1 : **filesystem only**. Pas d'écriture directe dans la DB du reader. Le reader ingère depuis les fichiers via watcher / au boot.
+- Auth Siyuan : **API Token** stocké server-side (`SIYUAN_TOKEN`). N'est JAMAIS exposé au reader ni inclus dans les snapshots.
+- Endpoints Siyuan utilisés (liste bornée) :
+  - `POST /api/attr/getBlockAttrs` — vérification IAL (defense in depth).
+  - `POST /api/block/getDocInfo` — métadonnées doc.
+  - `POST /api/filetree/getDoc` (mode 4, size 0) — contenu HTML complet.
+  - `POST /api/file/getFile` — assets uniquement (path commence par `/data/assets/`).
+- **Interdit** : `/api/query/sql`, et tout endpoint qui prend une payload arbitraire interprétée comme requête.
+
+## 5. Hors scope V1 (verrouillé)
 
 - Granularité bloc / box.
 - Branding par client.
@@ -322,7 +372,7 @@ Pas d'auto-signup. Pas d'inscription depuis l'UI publique.
 
 ---
 
-## 5. Évolutions probables post-V1 à garder en tête
+## 6. Évolutions probables post-V1 à garder en tête
 
 - Granularité bloc (publier un fragment d'un doc).
 - Branding par projet (logo, couleurs, domaine).
