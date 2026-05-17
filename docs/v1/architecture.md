@@ -2,6 +2,8 @@
 
 > Document de référence verrouillé pour la V1 du projet "Siyuan back-office + reader companion".
 > Trois sections : (1) schéma de publication d'un document, (2) format du snapshot produit par l'extracteur, (3) modèle de données du reader.
+>
+> **⚠ Amendement V1 — déploiement Vercel** : la frontière `extractor → reader` est désormais HTTP-push, plus filesystem-partagé. Les §3 (modèle de données reader) et §4 (extracteur — décisions techniques) ci-dessous sont **amendés** par [`ingest.md`](ingest.md). Le reste de la spec (format snapshot, schéma blocs, ACL, magic-link, branding) reste valide sans changement.
 
 ## Rappel des choix de cadrage V1
 
@@ -220,6 +222,8 @@ L'extracteur écrit dans un fichier temporaire (`*.<random>.tmp` dans le même d
 
 ## 3. Modèle de données du reader
 
+> **⚠ Amendé par [`ingest.md`](ingest.md) §1, §9.** En mode Vercel, la DB Turso (libSQL, dialecte SQLite) devient l'**unique source de vérité** : le `snapshot_json`, le `html` et les bytes des assets sont stockés en DB. La colonne `documents.snapshot_path` disparaît et une table `assets` est ajoutée. Voir `ingest.md` §9 pour le diff précis du schéma.
+
 Stockage relationnel. **SQLite** en V1 (≤ 20 lecteurs, ~quelques centaines de docs : largement dimensionné, zéro ops). Migration Postgres plus tard si besoin via Drizzle/Prisma agnostiques.
 
 ### Table `users` (gérée par Auth.js)
@@ -346,9 +350,11 @@ Pas d'auto-signup. Pas d'inscription depuis l'UI publique.
 
 ## 4. Extracteur — décisions techniques (post-cadrage)
 
+> **⚠ Amendé par [`ingest.md`](ingest.md).** La décision « Sink V1 : filesystem only » ci-dessous est **abandonnée pour le déploiement Vercel** : l'extractor pousse désormais en HTTP vers le reader, qui écrit directement en DB Turso. Le sink filesystem reste valide pour le dev Docker tout-local mais n'est plus le déploiement cible. Voir `ingest.md` §0 pour la rupture explicite et §3 pour les nouveaux endpoints.
+
 - Repo séparé : `siyuan-extractor/`. Stack : Node.js 20+, TypeScript, Fastify, fetch natif, sanitize-html, cheerio.
 - Mode : serveur HTTP long-running. Pas de CLI one-shot, pas de polling fallback en V1 (le webhook plugin est l'unique source d'événements).
-- Sink V1 : **filesystem only**. Pas d'écriture directe dans la DB du reader. Le reader ingère depuis les fichiers via watcher / au boot.
+- Sink V1 : **filesystem only**. Pas d'écriture directe dans la DB du reader. Le reader ingère depuis les fichiers via watcher / au boot. *(Amendé : voir encart ci-dessus.)*
 - Auth Siyuan : **API Token** stocké server-side (`SIYUAN_TOKEN`). N'est JAMAIS exposé au reader ni inclus dans les snapshots.
 - Endpoints Siyuan utilisés (liste bornée) :
   - `POST /api/attr/getBlockAttrs` — vérification IAL (defense in depth).
